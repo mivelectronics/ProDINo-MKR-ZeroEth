@@ -24,7 +24,7 @@ tools/tester/             ProDINo-MKR-Tester: Windows exe to flash the app and t
    Alternative over SWD (J-Link on J11): `pio run -e prodino_mkr_jlink -t upload`.
 2. **Console**: `pio device monitor` (115200) - `?` lists the commands (relays, inputs, LED,
    Ethernet, RS485, I2C/OLED, J14). Every reply ends with `OK`/`ERR`.
-3. **Or use the GUI**: `ProDINo-MKR-Tester.zip` (unzip, run `ProDINo-MKR-Tester.exe`) does 1-2
+3. **Or use the GUI**: `ProDINo-MKR-Tester.zip` from the Releases page (unzip, run `ProDINo-MKR-Tester.exe`) does 1-2
    with buttons and a "Run all" PASS/FAIL report.
 
 ### Manual bootloader entry

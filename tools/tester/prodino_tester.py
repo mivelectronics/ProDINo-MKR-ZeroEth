@@ -71,7 +71,9 @@ class Link:
         return self.ser is not None and self.ser.is_open
 
     def connect(self, port: str):
-        self.ser = serial.Serial(port, 115200, timeout=0.1)
+        # write_timeout: an application that never reads its USB CDC port (anything but the
+        # test firmware) stalls writes after a few bytes; without it the GUI thread hangs.
+        self.ser = serial.Serial(port, 115200, timeout=0.1, write_timeout=0.3)
         threading.Thread(target=self._reader, daemon=True).start()
 
     def close(self):
@@ -110,7 +112,10 @@ class Link:
     def send(self, cmd: str):
         if not self.open:
             raise RuntimeError("not connected")
-        self.ser.write((cmd + "\n").encode())
+        try:
+            self.ser.write((cmd + "\n").encode())
+        except serial.SerialTimeoutException:
+            raise RuntimeError("board does not read commands - not the test firmware? Use Flash application")
 
     def command(self, cmd: str, timeout: float = 3.0) -> tuple[bool, list[str]]:
         """Send and wait for OK/ERR. Returns (ok, lines without the OK/ERR line)."""
@@ -118,7 +123,12 @@ class Link:
             self._reply = []
             self._waiting = True
             self._done.clear()
-        self.send(cmd)
+        try:
+            self.send(cmd)
+        except RuntimeError as e:
+            with self._lock:
+                self._waiting = False
+            return False, [str(e)]
         got = self._done.wait(timeout)
         with self._lock:
             self._waiting = False
@@ -157,6 +167,8 @@ class App(tk.Tk):
         self._hide_ok = False
         self.inputs = [0, 0, 0, 0]
         self.relays = [0, 0, 0, 0]
+        self.verified = False          # the port answered "v" as the test firmware
+        self.foreign_port = ""         # port whose application is not the test firmware (no auto-connect)
 
         self._build()
         self.after(100, self._pump)
@@ -430,13 +442,17 @@ class App(tk.Tk):
     def _autodetect(self):
         if not self.link.open and not self.busy:
             self._refresh_ports()
-            if find_port(PID_APP):
+            app = find_port(PID_APP)
+            if self.foreign_port and app != self.foreign_port:
+                self.foreign_port = ""            # board unplugged / re-enumerated: try again
+            if app and app != self.foreign_port:
                 self._toggle_connect()
         self.after(2000, self._autodetect)
 
     def _toggle_connect(self):
         if self.link.open:
             self.link.close()
+            self.verified = False
             self._set_connected(False)
             return
         port = self.port_var.get()
@@ -447,8 +463,25 @@ class App(tk.Tk):
         except Exception as e:
             self.log(f"!! cannot open {port}: {e}", "err")
             return
+        self.verified = False
         self._set_connected(True, port)
-        self.after(300, lambda: self._do("v"))
+        self.log("> v", "tx")
+        self._bg(lambda: self._verify(port))
+
+    def _verify(self, port: str):
+        """Is the test firmware answering? Anything else (KMP / customer app) gets disconnected,
+        so the GUI never blocks on it; flashing still works (1200 bps touch)."""
+        time.sleep(0.3)
+        ok, lines = self.link.command("v", 2.0)
+        if ok and any("fw:" in l for l in lines):
+            self.verified = True
+            self.foreign_port = ""
+            return
+        self.link.close()
+        self.foreign_port = port
+        self.q.put(f"!! {port}: no answer from the test firmware - another application is on the board.")
+        self.q.put("!! Use Flash application (Flash tab) to load the test firmware.")
+        self.after(0, lambda: self.state_lbl.config(text=f"● {port}: other firmware - flash it", foreground="#d08000"))
 
     def _set_connected(self, on: bool, port: str = ""):
         self.conn_btn["text"] = "Disconnect" if on else "Connect"
@@ -457,7 +490,7 @@ class App(tk.Tk):
             self.status_lbl["text"] = ""
 
     def _poll_status(self):
-        if self.link.open and not self.busy:
+        if self.link.open and self.verified and not self.busy:
             try:
                 self.link.send("st")
             except Exception:
@@ -509,32 +542,49 @@ class App(tk.Tk):
                 self.q.put("  " + line)
         return p.wait()
 
+    def _wait_boot_port(self, seconds: float) -> str:
+        t0 = time.time()
+        while time.time() - t0 < seconds:
+            port = find_port(PID_BOOT)
+            if port:
+                return port
+            time.sleep(0.3)
+        return ""
+
     def _enter_bootloader(self) -> str:
-        """Ask the app to reboot into the bootloader (console 'boot', else 1200 bps touch). Returns its port."""
+        """Get the board into the bootloader and return its port: console 'boot' when the test
+        firmware runs, otherwise (or if that did not work) the Arduino 1200 bps touch."""
         port = find_port(PID_BOOT)
         if port:
             return port
         if self.link.open:
-            try:
-                self.link.send("boot")
-            except Exception:
-                pass
+            if self.verified:
+                try:
+                    self.link.send("boot")
+                    self.q.put("!! sent 'boot', waiting for the bootloader port")
+                except Exception:
+                    pass
             time.sleep(0.2)
             self.link.close()
-            self.q.put("!! sent 'boot', waiting for the bootloader port")
-        else:
+            self.verified = False
+            port = self._wait_boot_port(3)
+        for attempt in range(2):
+            if port:
+                break
             app = find_port(PID_APP)
-            if app:
-                self.q.put(f"!! 1200 bps touch on {app}")
-                try:
-                    serial.Serial(app, 1200).close()
-                except Exception as e:
-                    self.q.put(f"!! touch failed: {e}")
-        t0 = time.time()
-        while time.time() - t0 < 10 and not port:
-            time.sleep(0.3)
-            port = find_port(PID_BOOT)
-        self.q.put(f"!! bootloader port: {port}" if port else "!! no bootloader port - double-tap RESET (B1)")
+            if not app:
+                break
+            self.q.put(f"!! 1200 bps touch on {app}")
+            try:
+                # open at 1200 bps and drop DTR: the Arduino USB stack of any sketch resets into the bootloader
+                s = serial.Serial(app, 1200, write_timeout=0.3)
+                s.dtr = False
+                s.close()
+            except Exception as e:
+                self.q.put(f"!! touch failed: {e}")
+            port = self._wait_boot_port(6)
+        self.q.put(f"!! bootloader port: {port}" if port else
+                   "!! no bootloader port - double-tap RESET (B1), then Flash application again")
         return port
 
     def _flash_app(self):
@@ -556,6 +606,7 @@ class App(tk.Tk):
                                     "--erase", "-U", "true", fw])
             if rc != 0:
                 raise RuntimeError(f"bossac exited with {rc}")
+            self.foreign_port = ""
             t0 = time.time()
             while time.time() - t0 < 10 and not find_port(PID_APP):
                 time.sleep(0.3)

@@ -1,0 +1,7 @@
+.pio/
+.vscode/
+*.pyc
+__pycache__/
+tools/tester/build/
+tools/tester/dist/
+tools/tester/resources/bossac.exe

@@ -1,8 +1,7 @@
 # ProDINo MKR Zero Ethernet v11 - pin map
 
-Source: `ProDINoZERO-ETHv11.PcbDoc` (pad → net table of U3, traced to the peripherals),
-`D:\SVN_Repo\MIV_HW\Products\_customers\KMPElectronics\PRoDINoMKR\ProDINoZERO-ETHv11`.
-Cross-checked against KMP's `KMPProDinoMKRZero` library (same pins).
+Source: the Altium board `ProDINoZERO-ETHv11.PcbDoc` (pad → net table of U3, traced to the
+peripherals). Cross-checked against KMP's `KMPProDinoMKRZero` library (same pins).
 
 MCU **U3 = ATSAMD21G18A-AU**, 48 MHz, 32.768 kHz crystal Y2 on PA00/PA01.
 The board uses exactly the **Arduino MKR GSM 1400** pin assignment (net names `D0..D14`,
